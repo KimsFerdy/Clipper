@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=Clipper
+GenericName=Clipboard History
+Comment=Everything you copy, one shortcut away
+Exec=Clipper
+Icon=clipper
+Terminal=false
+Categories=Utility;
+Keywords=clipboard;history;copy;paste;clip;
+StartupWMClass=clipper
+Actions=Popup;
+
+[Desktop Action Popup]
+Name=Show Clipboard Popup
+Exec=Clipper --popup
