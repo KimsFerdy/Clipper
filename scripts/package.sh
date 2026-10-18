@@ -15,7 +15,8 @@ cmake --build --preset release -j "$JOBS"
 
 # .deb
 (cd build/release && cpack -G DEB -B "$DIST/cpack" >/dev/null)
-mv "$DIST"/cpack/*.deb "$DIST/"
+# the package version is 0.1.0~beta (sorts before 0.1.0), the file gets a plain - since github turns ~ into .
+for deb in "$DIST"/cpack/*.deb; do mv "$deb" "$DIST/$(basename "${deb//\~/-}")"; done
 rm -rf "$DIST/cpack"
 
 # .tar.gz (copy bin/ + share/ into ~/.local)

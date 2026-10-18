@@ -44,7 +44,7 @@ into the app you were in.
 
 | Package | Best for | Install |
 |---|---|---|
-| `.deb` | Ubuntu 24.04+, Linux Mint 22+, Debian 13+ | `sudo apt install ./clipper_0.1.0~beta_amd64.deb` |
+| `.deb` | Ubuntu 24.04+, Linux Mint 22+, Debian 13+ | `sudo apt install ./clipper_0.1.0-beta_amd64.deb` |
 | `AppImage` | Any recent distro, no install | `chmod +x Clipper-*.AppImage && ./Clipper-*.AppImage` |
 | `.tar.gz` | Manual install into `~/.local` | `tar xzf clipper-*.tar.gz && cp -r clipper-*/{bin,share} ~/.local/` |
 
