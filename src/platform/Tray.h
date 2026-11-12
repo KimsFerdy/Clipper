@@ -12,8 +12,9 @@ struct sd_bus;
 
 namespace clipper {
 
-// tray icon over d-bus: StatusNotifierItem + a tiny com.canonical.dbusmenu.
+// linux (Tray.cpp): tray icon over d-bus, StatusNotifierItem + a tiny com.canonical.dbusmenu.
 // works on cinnamon (xapp-sn-watcher), kde, xfce. gnome needs the appindicator extension.
+// windows (Win32Tray.cpp): Shell_NotifyIcon from a hidden window, icon from the exe's resources.
 // runs its own thread, the ui just drains actions
 class Tray {
 public:
@@ -37,15 +38,22 @@ public:
 
 private:
     friend struct TrayDbus;
+    friend struct TrayWin32;
 
     void run();
+#ifndef _WIN32
     bool registerWithWatcher();
+#endif
     void push(Action action);
 
     std::vector<Icon> icons_;
     std::function<void()> wake_;
+#ifdef _WIN32
+    std::atomic<void*> hwnd_{nullptr};
+#else
     std::string busName_;
     sd_bus* bus_ = nullptr;  // only touched on the tray thread
+#endif
 
     std::atomic<bool> available_{false};
     std::atomic<bool> stop_{false};

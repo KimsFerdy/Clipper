@@ -30,6 +30,7 @@
     {
       "name": "asan",
       "displayName": "Debug + ASan/UBSan",
+      "condition": { "type": "notEquals", "lhs": "${hostSystemName}", "rhs": "Windows" },
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {

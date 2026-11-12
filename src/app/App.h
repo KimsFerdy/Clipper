@@ -15,8 +15,8 @@
 #include "platform/AppBus.h"
 #include "platform/Appearance.h"
 #include "platform/Tray.h"
-#include "platform/X11Clipboard.h"
-#include "platform/X11Desktop.h"
+#include "platform/Clipboard.h"
+#include "platform/Desktop.h"
 
 struct ImVec2;
 
@@ -28,13 +28,15 @@ namespace clipper {
 class App {
 public:
     // wake: thread safe, pokes the main loop (glfwPostEmptyEvent)
-    App(const SystemAppearance& system, float displayScale, std::function<void()> wake, X11Desktop& desktop);
+    App(const SystemAppearance& system, float displayScale, std::function<void()> wake, Desktop& desktop);
     ~App();
     App(const App&) = delete;
     App& operator=(const App&) = delete;
 
-    void setOwnWindow(X11Desktop::WindowId window) { ownWindow_ = window; }
+    void setOwnWindow(Desktop::WindowId window) { ownWindow_ = window; }
     void start(bool background);
+    // --screenshot: sample clips if the history is empty, then the manager / popup ready to draw, no window juggling
+    void showcase(bool popup);
     void remote(const AppBus::Request& request);  // another launch / the shortcut
     void tick();                                  // every loop iteration, visible or not
     void draw();                                  // only while visible
@@ -97,15 +99,15 @@ private:
     void setZoom(float zoom);
 
     std::function<void()> wake_;
-    X11Desktop& desktop_;
-    X11Desktop::WindowId ownWindow_ = 0;
+    Desktop& desktop_;
+    Desktop::WindowId ownWindow_ = 0;
 
     Settings settings_;
     SystemAppearance systemAppearance_;
     float displayScale_ = 1.0f;
     ClipStore store_;
     std::string storeError_;
-    std::unique_ptr<X11Clipboard> clipboard_;
+    std::unique_ptr<Clipboard> clipboard_;
     std::unique_ptr<Tray> tray_;
     std::unique_ptr<Thumbnails> thumbs_;
     PreferencesDialog preferences_;
@@ -124,12 +126,12 @@ private:
     int popupRow_ = 0;
     bool popupFocusSearch_ = false;
     bool popupHadFocus_ = false;
-    X11Desktop::WindowId target_ = 0;
+    Desktop::WindowId target_ = 0;
     int anchorX_ = 0, anchorY_ = 0;
     bool haveAnchor_ = false;
     struct PendingPaste {
         bool active = false;
-        X11Desktop::WindowId window = 0;
+        Desktop::WindowId window = 0;
         bool terminal = false;
     } pendingPaste_;
 

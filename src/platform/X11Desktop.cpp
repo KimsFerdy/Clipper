@@ -1,4 +1,4 @@
-#include "platform/X11Desktop.h"
+#include "platform/Desktop.h"
 
 #include <X11/XKBlib.h>
 #include <X11/Xatom.h>
@@ -34,19 +34,19 @@ constexpr std::string_view kTerminals[] = {
 
 }  // namespace
 
-X11Desktop::X11Desktop(_XDisplay* display) : dpy_(display) {
+Desktop::Desktop(_XDisplay* display) : dpy_(display) {
     // libxtst6 is on every desktop install, its -dev package often isn't. dlopen = no build dep
     xtst_ = dlopen("libXtst.so.6", RTLD_LAZY | RTLD_LOCAL);
     if (xtst_) fakeKey_ = reinterpret_cast<FakeKeyFn>(dlsym(xtst_, "XTestFakeKeyEvent"));
 }
 
-X11Desktop::~X11Desktop() {
+Desktop::~Desktop() {
     if (xtst_) dlclose(xtst_);
 }
 
-unsigned long X11Desktop::atom(const char* name) const { return XInternAtom(dpy_, name, False); }
+unsigned long Desktop::atom(const char* name) const { return XInternAtom(dpy_, name, False); }
 
-X11Desktop::WindowId X11Desktop::activeWindow() const {
+Desktop::WindowId Desktop::activeWindow() const {
     if (!dpy_) return 0;
     Atom type;
     int format;
@@ -62,7 +62,7 @@ X11Desktop::WindowId X11Desktop::activeWindow() const {
     return active;
 }
 
-std::string X11Desktop::windowClass(WindowId window) const {
+std::string Desktop::windowClass(WindowId window) const {
     if (!dpy_ || !window) return {};
     XClassHint hint{};
     std::string out;
@@ -74,14 +74,14 @@ std::string X11Desktop::windowClass(WindowId window) const {
     return out;
 }
 
-bool X11Desktop::isTerminal(WindowId window) const {
+bool Desktop::isTerminal(WindowId window) const {
     const std::string cls = toLower(windowClass(window));
     if (cls.empty()) return false;
     return std::find(std::begin(kTerminals), std::end(kTerminals), cls) != std::end(kTerminals) ||
            cls.find("terminal") != std::string::npos;
 }
 
-void X11Desktop::activate(WindowId window, bool raise) const {
+void Desktop::activate(WindowId window, bool raise) const {
     if (!dpy_ || !window) return;
     XEvent ev{};
     ev.xclient.type = ClientMessage;
@@ -95,7 +95,7 @@ void X11Desktop::activate(WindowId window, bool raise) const {
     XFlush(dpy_);
 }
 
-bool X11Desktop::waitUntilActive(WindowId window, int timeoutMs) const {
+bool Desktop::waitUntilActive(WindowId window, int timeoutMs) const {
     const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
     while (std::chrono::steady_clock::now() < end) {
         if (activeWindow() == window) return true;
@@ -104,7 +104,7 @@ bool X11Desktop::waitUntilActive(WindowId window, int timeoutMs) const {
     return false;
 }
 
-bool X11Desktop::pointer(int* x, int* y) const {
+bool Desktop::pointer(int* x, int* y) const {
     if (!dpy_) return false;
     Window rootRet, child;
     int wx, wy;
@@ -112,7 +112,7 @@ bool X11Desktop::pointer(int* x, int* y) const {
     return XQueryPointer(dpy_, DefaultRootWindow(dpy_), &rootRet, &child, x, y, &wx, &wy, &mask);
 }
 
-void X11Desktop::setPopupHints(WindowId window, bool popup) const {
+void Desktop::setPopupHints(WindowId window, bool popup) const {
     if (!dpy_ || !window) return;
     const Atom type = atom(popup ? "_NET_WM_WINDOW_TYPE_UTILITY" : "_NET_WM_WINDOW_TYPE_NORMAL");
     XChangeProperty(dpy_, window, atom("_NET_WM_WINDOW_TYPE"), XA_ATOM, 32, PropModeReplace,
@@ -125,7 +125,7 @@ void X11Desktop::setPopupHints(WindowId window, bool popup) const {
     XFlush(dpy_);
 }
 
-bool X11Desktop::sendPaste(bool terminalStyle) const {
+bool Desktop::sendPaste(bool terminalStyle) const {
     if (!dpy_ || !fakeKey_) return false;
 
     // still holding Ctrl / Shift / Alt / Super from picking the clip? Ctrl+Shift+V would just open us again

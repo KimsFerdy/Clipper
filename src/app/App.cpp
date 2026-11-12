@@ -1,12 +1,11 @@
 #include "app/App.h"
 
-#include <unistd.h>
-
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
+#include <thread>
 #include <utility>
 
 #include "AppIcon.h"
@@ -18,7 +17,7 @@
 #include "platform/Autostart.h"
 #include "platform/GlobalShortcut.h"
 #include "platform/Paths.h"
-#include "platform/Process.h"
+#include "platform/Shell.h"
 #include "stb_image.h"
 
 #ifndef CLIPPER_VERSION
@@ -36,7 +35,16 @@ int64_t nowMs() {
         .count();
 }
 
-//
+std::tm localTime(std::time_t t) {
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    return tm;
+}
+
 std::string formatSize(uint64_t bytes) {
     const char* units[] = {"B", "KB", "MB", "GB"};
     double v = static_cast<double>(bytes);
@@ -63,8 +71,7 @@ std::string formatAge(int64_t ms) {
         std::snprintf(buf, sizeof buf, "%lld d", static_cast<long long>(s / 86400));
     else {
         std::time_t t = static_cast<std::time_t>(ms / 1000);
-        std::tm tm{};
-        localtime_r(&t, &tm);
+        const std::tm tm = localTime(t);
         std::strftime(buf, sizeof buf, "%b %d", &tm);
     }
     return buf;
@@ -72,8 +79,7 @@ std::string formatAge(int64_t ms) {
 
 std::string formatTime(int64_t ms) {
     std::time_t t = static_cast<std::time_t>(ms / 1000);
-    std::tm tm{};
-    localtime_r(&t, &tm);
+    const std::tm tm = localTime(t);
     char buf[32];
     std::strftime(buf, sizeof buf, "%Y-%m-%d %H:%M", &tm);
     return buf;
@@ -140,12 +146,184 @@ void hint(const char* text) {
     ImGui::PopTextWrapPos();
 }
 
+// ---- the drawn bits of the look ----
+
+float strokeWidth() { return std::max(1.0f, std::round(ImGui::GetFontSize() / 11.0f)); }
+
+// list rows: a soft raised pill (hairline + a whisper of shadow) when selected, a faint one when hovered.
+// call right after the Selectable, with the Header colours pushed transparent (RowColors below)
+void rowBackground(bool selected, bool hovered) {
+    if (!selected && !hovered) return;
+    const ThemeColors& tc = themeColors();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+    const float r = ImGui::GetStyle().FrameRounding;
+    if (selected) {
+        dl->AddRectFilled(ImVec2(a.x, a.y + 1), ImVec2(b.x, b.y + 1.5f), IM_COL32(0, 0, 0, tc.dark ? 60 : 14), r);
+        dl->AddRectFilled(a, b, tc.raised, r);
+        dl->AddRect(a, b, tc.hairline, r, 0, 1.0f);
+    } else {
+        dl->AddRectFilled(a, b, tc.hover, r);
+    }
+}
+
+// selectables draw nothing themselves, rowBackground does it rounded. pop in the same window (before EndChild)
+void pushRowColors() {
+    ImGui::PushStyleColor(ImGuiCol_Header, IM_COL32(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, IM_COL32(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, IM_COL32(0, 0, 0, 0));
+}
+void popRowColors() { ImGui::PopStyleColor(3); }
+
+// "12" in a little rounded badge, right edge at x
+float countPill(float right, float centerY, size_t count) {
+    const ThemeColors& tc = themeColors();
+    const std::string n = std::to_string(count);
+    const ImVec2 ts = ImGui::CalcTextSize(n.c_str());
+    const float h = std::round(ImGui::GetTextLineHeight() * 1.1f);
+    const float w = std::max(h, ts.x + h * 0.7f);
+    const ImVec2 a(right - w, std::round(centerY - h * 0.5f));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(a, ImVec2(right, a.y + h), tc.pill, h * 0.5f);
+    dl->AddText(ImVec2(std::round(a.x + (w - ts.x) * 0.5f), std::round(a.y + (h - ts.y) * 0.5f)),
+                ImGui::GetColorU32(tc.dimText), n.c_str());
+    return w;
+}
+
+void iconClock(ImVec2 c, float r, ImU32 col) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float t = strokeWidth();
+    dl->AddCircle(c, r, col, 24, t);
+    dl->AddLine(c, ImVec2(c.x, c.y - r * 0.55f), col, t);
+    dl->AddLine(c, ImVec2(c.x + r * 0.4f, c.y + r * 0.2f), col, t);
+}
+
+// pinned = a bookmark ribbon. filled on pinned rows, outline in the sidebar
+void iconPin(ImVec2 c, float r, ImU32 col, bool filled = false) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float x0 = std::round(c.x - r * 0.62f), x1 = std::round(c.x + r * 0.62f);
+    const float y0 = std::round(c.y - r * 0.85f), y1 = std::round(c.y + r * 0.85f);
+    const ImVec2 pts[] = {ImVec2(x0, y0), ImVec2(x1, y0), ImVec2(x1, y1), ImVec2(c.x, y1 - r * 0.5f), ImVec2(x0, y1)};
+    if (filled)
+        dl->AddConcavePolyFilled(pts, 5, col);
+    else
+        dl->AddPolyline(pts, 5, col, ImDrawFlags_Closed, strokeWidth());
+}
+
+void iconFolder(ImVec2 c, float r, ImU32 col) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float x0 = c.x - r, x1 = c.x + r, y0 = c.y - r * 0.72f, y1 = c.y + r * 0.72f;
+    const ImVec2 pts[] = {ImVec2(x0, y1),           ImVec2(x0, y0),           ImVec2(x0 + r * 0.75f, y0),
+                          ImVec2(x0 + r, y0 + r * 0.28f), ImVec2(x1, y0 + r * 0.28f), ImVec2(x1, y1)};
+    dl->AddPolyline(pts, 6, col, ImDrawFlags_Closed, strokeWidth());
+}
+
+void iconSearch(ImVec2 c, float r, ImU32 col) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float t = strokeWidth();
+    const ImVec2 lens(c.x - r * 0.2f, c.y - r * 0.2f);
+    dl->AddCircle(lens, r * 0.7f, col, 20, t);
+    dl->AddLine(ImVec2(lens.x + r * 0.5f, lens.y + r * 0.5f), ImVec2(c.x + r * 0.85f, c.y + r * 0.85f), col, t);
+}
+
+// rounded input with a magnifier in front. GetItemID() after it is the input's
+bool searchField(const char* id, const char* hintText, std::string* text, float width, ImGuiInputTextFlags flags = 0) {
+    const float em = ImGui::GetFontSize();
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(std::round(em * 2.0f), ImGui::GetStyle().FramePadding.y));
+    ImGui::SetNextItemWidth(width);
+    const bool changed = ImGui::InputTextWithHint(id, hintText, text, flags);
+    ImGui::PopStyleVar();
+    const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+    iconSearch(ImVec2(a.x + em * 1.0f, (a.y + b.y) * 0.5f), em * 0.42f, ImGui::GetColorU32(themeColors().dimText));
+    return changed;
+}
+
+// [ History | Pinned ] in a track, the picked one raised. true when it changed
+bool segmented(const char* id, std::initializer_list<const char*> labels, int* value) {
+    const ThemeColors& tc = themeColors();
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float h = ImGui::GetFrameHeight(), pad = std::round(style.FramePadding.x * 0.3f);
+    float w = pad * 2;
+    for (const char* l : labels) w += ImGui::CalcTextSize(l).x + style.FramePadding.x * 2;
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), tc.pill, style.FrameRounding);
+    bool changed = false;
+    float x = p.x + pad;
+    int i = 0;
+    ImGui::PushID(id);
+    for (const char* l : labels) {
+        const float lw = ImGui::CalcTextSize(l).x + style.FramePadding.x * 2;
+        ImGui::SetCursorScreenPos(ImVec2(x, p.y + pad));
+        ImGui::PushID(i);
+        if (ImGui::InvisibleButton("seg", ImVec2(lw, h - pad * 2)) && *value != i) {
+            *value = i;
+            changed = true;
+        }
+        ImGui::PopID();
+        const bool on = *value == i;
+        const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+        if (on) {
+            dl->AddRectFilled(a, b, tc.raised, style.FrameRounding - pad);
+            dl->AddRect(a, b, tc.hairline, style.FrameRounding - pad);
+        }
+        const ImVec2 ts = ImGui::CalcTextSize(l);
+        dl->AddText(ImVec2(std::round(a.x + (lw - ts.x) * 0.5f), std::round((a.y + b.y - ts.y) * 0.5f)),
+                    on || ImGui::IsItemHovered() ? ImGui::GetColorU32(ImGuiCol_Text) : ImGui::GetColorU32(tc.dimText), l);
+        x += lw;
+        ++i;
+    }
+    ImGui::PopID();
+    ImGui::SetCursorScreenPos(p);
+    ImGui::Dummy(ImVec2(w, h));
+    return changed;
+}
+
+// on / off switch, accent track when on. true when it flipped
+bool toggleSwitch(const char* label, bool* on) {
+    const ThemeColors& tc = themeColors();
+    const float lineH = ImGui::GetTextLineHeight();
+    const float h = std::round(lineH * 0.95f), w = std::round(h * 1.75f);
+    const float frameH = ImGui::GetFrameHeight();
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const float labelW = ImGui::CalcTextSize(label, nullptr, true).x;
+    const float gap = ImGui::GetStyle().ItemInnerSpacing.x;
+    const bool clicked = ImGui::InvisibleButton(label, ImVec2(w + gap + labelW, frameH));
+    if (clicked) *on = !*on;
+    const bool hot = ImGui::IsItemHovered();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 a(p.x, std::round(p.y + (frameH - h) * 0.5f)), b(a.x + w, a.y + h);
+    dl->AddRectFilled(a, b, *on ? tc.accent : (hot ? tc.hover : tc.pill), h * 0.5f);
+    if (!*on) dl->AddRect(a, b, tc.hairline, h * 0.5f);
+    const float r = h * 0.5f - 2.0f;
+    const ImVec2 knob(*on ? b.x - h * 0.5f : a.x + h * 0.5f, a.y + h * 0.5f);
+    dl->AddCircleFilled(ImVec2(knob.x, knob.y + 0.5f), r + 0.5f, IM_COL32(0, 0, 0, 40), 20);
+    dl->AddCircleFilled(knob, r, IM_COL32(255, 255, 255, 255), 20);
+    dl->AddText(ImVec2(b.x + gap, std::round(p.y + (frameH - lineH) * 0.5f)), ImGui::GetColorU32(ImGuiCol_Text), label,
+                ImGui::FindRenderedTextEnd(label));
+    return clicked;
+}
+
+// card = rounded panel with a hairline, for the list and the details
+bool beginCard(const char* id, ImVec2 size) {
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, themeColors().panel);
+    const bool open = ImGui::BeginChild(id, size, ImGuiChildFlags_Borders);
+    ImGui::PopStyleColor();
+    return open;
+}
+
+void sectionLabel(const char* text) {
+    ImGui::PushStyleColor(ImGuiCol_Text, themeColors().faint);
+    ImGui::TextUnformatted(text);
+    ImGui::PopStyleColor();
+}
+
 // view ids for drag and drop targets
 constexpr int kViewHistory = 0, kViewPinned = 1, kViewFolder = 2;
 
 }  // namespace
 
-App::App(const SystemAppearance& system, float displayScale, std::function<void()> wake, X11Desktop& desktop)
+App::App(const SystemAppearance& system, float displayScale, std::function<void()> wake, Desktop& desktop)
     : wake_(std::move(wake)),
       desktop_(desktop),
       settings_(loadSettings()),
@@ -155,7 +333,7 @@ App::App(const SystemAppearance& system, float displayScale, std::function<void(
     applyTheme(appearance(), displayScale_);
     if (!store_.load(&storeError_)) std::fprintf(stderr, "clipper: %s\n", storeError_.c_str());
     thumbs_ = std::make_unique<Thumbnails>(wake_);
-    clipboard_ = std::make_unique<X11Clipboard>(wake_);
+    clipboard_ = std::make_unique<Clipboard>(wake_);
     clipboard_->setCapturing(settings_.capturing);
     clipboard_->setCaptureImages(settings_.captureImages);
     updateTray();
@@ -179,6 +357,10 @@ void App::start(bool background) {
         saveSettings(settings_);
         if (settings_.popupShortcut)
             setStatus("Press " + prettyAccel(settings_.shortcut) + " in any app to open your clipboard history");
+    } else if (settings_.popupShortcut && shortcutDesktop() == ShortcutDesktop::Windows) {
+        // RegisterHotKey only lasts as long as we run, so it gets set up on every start, not just the first
+        if (!setGlobalShortcut(settings_.shortcut))
+            setStatus(prettyAccel(settings_.shortcut) + " is taken by another app, pick another shortcut in Preferences");
     }
 
     startTime_ = std::chrono::steady_clock::now();
@@ -200,6 +382,9 @@ void App::remote(const AppBus::Request& request) {
             break;
         case AppBus::Request::Kind::Show:
             windowRequest_ = WindowRequest::Manager;
+            break;
+        case AppBus::Request::Kind::Quit:
+            quit_ = true;
             break;
     }
 }
@@ -334,7 +519,7 @@ void App::pasteNow() {
         setStatus("Couldn't get back to the window, the clip is on the clipboard: paste it with Ctrl+V");
         return;
     }
-    usleep(40 * 1000);  // some apps (electron) ignore keys for a moment after getting focus
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));  // some apps (electron) ignore keys for a moment after getting focus
     desktop_.sendPaste(pendingPaste_.terminal);
 }
 
@@ -620,61 +805,63 @@ void App::popupKeys() {
 }
 
 void App::drawPopup() {
+    const ThemeColors& tc = themeColors();
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);  // the os window has the corners
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, tc.panel);
     ImGui::Begin("Clipper popup", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
                      ImGuiWindowFlags_NoScrollWithMouse);
-    ImGui::PopStyleVar();
-    const ThemeColors& tc = themeColors();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
     const ImGuiStyle& style = ImGui::GetStyle();
     const float em = ImGui::GetFontSize();
 
     popupKeys();
 
-    // search + view switch
+    // search + view switch + "open the manager"
     const bool pinnedView = popupFilter_.view == ClipFilter::View::Pinned;
-    const float viewW = ImGui::CalcTextSize("History").x + ImGui::CalcTextSize("Pinned").x +
-                        style.FramePadding.x * 4 + style.ItemSpacing.x + ImGui::GetFrameHeight() + style.ItemSpacing.x;
-    ImGui::SetNextItemWidth(-viewW - style.ItemSpacing.x);
+    const float moreW = ImGui::GetFrameHeight();
+    float segW = style.FramePadding.x * 4 + ImGui::CalcTextSize("History").x + ImGui::CalcTextSize("Pinned").x +
+                 std::round(style.FramePadding.x * 0.3f) * 2;
     if (popupFocusSearch_) {
         ImGui::SetKeyboardFocusHere();
         popupFocusSearch_ = false;
     }
     // keep the box focused: clicks on rows paste, arrows move, everything else is typing
     if (!ImGui::IsAnyItemActive() && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) ImGui::SetKeyboardFocusHere();
-    if (ImGui::InputTextWithHint("##q", pinnedView ? "Search pinned clips" : "Search clipboard history",
-                                 &popupFilter_.query)) {
+    if (searchField("##q", pinnedView ? "Search pinned" : "Search clipboard history", &popupFilter_.query,
+                    -(segW + moreW + style.ItemSpacing.x * 2))) {
         popupRow_ = 0;
         refilter();
     }
     ImGui::SameLine();
-    auto tab = [&](const char* label, ClipFilter::View view) {
-        const bool on = popupFilter_.view == view;
-        if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_HeaderActive));
-        if (ImGui::Button(label)) {
-            popupFilter_.view = view;
-            popupRow_ = 0;
-            refilter();
-            popupFocusSearch_ = true;
-        }
-        if (on) ImGui::PopStyleColor();
-        ImGui::SameLine();
-    };
-    tab("History", ClipFilter::View::History);
-    tab("Pinned", ClipFilter::View::Pinned);
-    if (ImGui::Button("...", ImVec2(ImGui::GetFrameHeight(), 0))) windowRequest_ = WindowRequest::Manager;
+    int view = pinnedView ? 1 : 0;
+    if (segmented("view", {"History", "Pinned"}, &view)) {
+        popupFilter_.view = view ? ClipFilter::View::Pinned : ClipFilter::View::History;
+        popupRow_ = 0;
+        refilter();
+        popupFocusSearch_ = true;
+    }
+    ImGui::SameLine();
+    ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(0, 0, 0, 0));
+    if (ImGui::Button("...", ImVec2(moreW, 0))) windowRequest_ = WindowRequest::Manager;
+    ImGui::PopStyleColor(2);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Open Clipper (Ctrl+M)");
 
     // list, then a preview of the selected clip, then the key hints
     const float hintsH = ImGui::GetTextLineHeightWithSpacing();
-    const float previewH = std::floor(ImGui::GetContentRegionAvail().y * 0.30f);
+    const float previewH = std::floor(ImGui::GetContentRegionAvail().y * 0.28f);
     const float listH = ImGui::GetContentRegionAvail().y - previewH - hintsH - style.ItemSpacing.y * 2;
-    const float rowH = std::round(ImGui::GetTextLineHeight() * 2.0f);
-    const float iconS = std::round(ImGui::GetTextLineHeight() * 1.25f);
+    const float rowH = std::round(ImGui::GetTextLineHeight() * 2.1f);
+    const float iconS = std::round(ImGui::GetTextLineHeight() * 1.15f);
+    const float rowGap = std::round(em * 0.15f);
 
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(style.ItemSpacing.x, rowGap));
     ImGui::BeginChild("list", ImVec2(0, listH), ImGuiChildFlags_None);
     if (popupResults_.empty()) {
         ImGui::Spacing();
@@ -688,8 +875,9 @@ void App::drawPopup() {
     lastRow = popupRow_;
     const bool mouseMoved = ImGui::GetIO().MouseDelta.x != 0 || ImGui::GetIO().MouseDelta.y != 0;
 
+    pushRowColors();
     ImGuiListClipper clip;
-    clip.Begin(static_cast<int>(popupResults_.size()), rowH + style.ItemSpacing.y);
+    clip.Begin(static_cast<int>(popupResults_.size()), rowH + rowGap);
     if (rowMoved) clip.IncludeItemByIndex(popupRow_);
     while (clip.Step()) {
         for (int row = clip.DisplayStart; row < clip.DisplayEnd; ++row) {
@@ -699,48 +887,56 @@ void App::drawPopup() {
             const bool selected = row == popupRow_;
             const ImVec2 p = ImGui::GetCursorScreenPos();
             if (ImGui::Selectable("##row", selected, ImGuiSelectableFlags_None, ImVec2(0, rowH))) pick(c->id, true);
-            if (ImGui::IsItemHovered() && mouseMoved) popupRow_ = row;  // like a menu, but keyboard wins until the mouse moves
+            const bool hovered = ImGui::IsItemHovered();
+            if (hovered && mouseMoved) popupRow_ = row;  // like a menu, but keyboard wins until the mouse moves
+            rowBackground(selected, false);
             if (selected && rowMoved) ImGui::SetScrollHereY(0.5f);
-            const float x1 = p.x + ImGui::GetContentRegionAvail().x;
-            const ImU32 text = selected ? tc.selectedText : ImGui::GetColorU32(ImGuiCol_Text);
-            const ImU32 dim = selected ? withAlpha(tc.selectedText, 0.75f) : ImGui::GetColorU32(tc.dimText);
-            const float ty = p.y + (rowH - ImGui::GetTextLineHeight()) * 0.5f;
+            const float x1 = p.x + ImGui::GetItemRectSize().x;
+            const ImU32 text = ImGui::GetColorU32(ImGuiCol_Text);
+            const ImU32 dim = ImGui::GetColorU32(tc.dimText);
+            const float ty = std::round(p.y + (rowH - ImGui::GetTextLineHeight()) * 0.5f);
+            ImDrawList* dl = ImGui::GetWindowDrawList();
 
             // number for Ctrl+1..9
-            float x = p.x + style.FramePadding.x * 0.5f;
+            float x = p.x + std::round(em * 0.6f);
             if (row < 9) {
                 char num[12];
                 std::snprintf(num, sizeof num, "%d", row + 1);
-                ImGui::GetWindowDrawList()->AddText(ImVec2(x, ty), dim, num);
+                dl->AddText(ImVec2(x, ty), selected ? dim : tc.faint, num);
             }
-            x += em * 1.0f;
+            x += em * 1.1f;
             drawKindIcon(*c, ImVec2(x, p.y + (rowH - iconS) * 0.5f), iconS, selected);
-            x += iconS + em * 0.6f;
+            x += iconS + em * 0.7f;
 
             const std::string age = formatAge(c->lastUsed);
             const float ageW = ImGui::CalcTextSize(age.c_str()).x;
-            float right = x1 - style.FramePadding.x - ageW;
-            ImGui::GetWindowDrawList()->AddText(ImVec2(right, ty), dim, age.c_str());
+            float right = x1 - em * 0.7f - ageW;
+            dl->AddText(ImVec2(right, ty), dim, age.c_str());
             if (c->pinned) {
-                right -= em * 0.9f;
-                ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(right + em * 0.3f, ty + ImGui::GetTextLineHeight() * 0.5f),
-                                                            em * 0.22f, selected ? tc.selectedText : tc.folderIcon);
+                right -= em * 1.1f;
+                iconPin(ImVec2(right + em * 0.45f, ty + ImGui::GetTextLineHeight() * 0.5f), em * 0.42f, tc.accent, true);
             }
             const std::string line = c->title.empty() ? previewLine(*c, 200) : c->title + "  —  " + previewLine(*c, 160);
             clippedText(ImVec2(x, ty), right - em * 0.6f, line, text);
             ImGui::PopID();
         }
     }
+    popRowColors();
     ImGui::EndChild();
+    ImGui::PopStyleVar();
 
     ImGui::Separator();
     if (const Clip* c = clipAt(popupResults_, popupRow_)) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetColorU32(tc.dimText));
         drawPreview(*c, previewH - style.ItemSpacing.y);
+        ImGui::PopStyleColor();
     } else {
         ImGui::Dummy(ImVec2(0, previewH - style.ItemSpacing.y));
     }
-    ImGui::TextColored(tc.dimText, "%s", settings_.autoPaste ? "Enter paste  ·  Ctrl+Enter copy  ·  Ctrl+P pin  ·  Shift+Del delete  ·  Tab pinned"
-                                                             : "Enter copy  ·  Ctrl+P pin  ·  Shift+Del delete  ·  Tab pinned");
+    ImGui::PushStyleColor(ImGuiCol_Text, tc.faint);
+    ImGui::TextUnformatted(settings_.autoPaste ? "Enter paste   ·   Ctrl+Enter copy   ·   Ctrl+P pin   ·   Shift+Del delete   ·   Tab pinned"
+                                               : "Enter copy   ·   Ctrl+P pin   ·   Shift+Del delete   ·   Tab pinned");
+    ImGui::PopStyleColor();
     ImGui::End();
 }
 
@@ -798,19 +994,20 @@ void App::drawManager() {
     const ImGuiStyle& style = ImGui::GetStyle();
     const float statusH = ImGui::GetTextLineHeightWithSpacing() + style.ItemSpacing.y;
     const float bodyH = ImGui::GetContentRegionAvail().y - statusH;
-    const float sidebarW = std::round(em * 12);
+    const float sidebarW = std::round(em * 12.5f);
+    const float gap = std::round(em * 0.75f);
     const float detailsW = std::round(std::max(em * 18, ImGui::GetContentRegionAvail().x * 0.38f));
 
+    // sidebar straight on the window, list + details as cards
     ImGui::BeginChild("sidebar", ImVec2(sidebarW, bodyH), ImGuiChildFlags_None);
     drawSidebar();
     ImGui::EndChild();
-    ImGui::SameLine();
-    ImGui::BeginChild("middle", ImVec2(ImGui::GetContentRegionAvail().x - detailsW - style.ItemSpacing.x, bodyH),
-                      ImGuiChildFlags_None);
+    ImGui::SameLine(0, gap);
+    beginCard("middle", ImVec2(ImGui::GetContentRegionAvail().x - detailsW - gap, bodyH));
     drawClipList();
     ImGui::EndChild();
-    ImGui::SameLine();
-    ImGui::BeginChild("details", ImVec2(0, bodyH), ImGuiChildFlags_Borders);
+    ImGui::SameLine(0, gap);
+    beginCard("details", ImVec2(0, bodyH));
     drawDetails();
     ImGui::EndChild();
 
@@ -873,50 +1070,78 @@ void App::dropTarget(int view, uint32_t folder) {
 
 void App::drawSidebar() {
     const ThemeColors& tc = themeColors();
-    auto entry = [&](const char* label, size_t count, ClipFilter::View view, uint32_t folder) {
+    const float em = ImGui::GetFontSize();
+    const float lineH = ImGui::GetTextLineHeight();
+    const float rowH = std::round(lineH * 2.0f);
+    enum class Icon { Clock, Pin, Folder };
+    pushRowColors();
+
+    auto entry = [&](const char* label, size_t count, ClipFilter::View view, uint32_t folder, Icon icon) {
         const bool on = managerFilter_.view == view && (view != ClipFilter::View::Folder || managerFilter_.folder == folder);
-        char buf[256];
-        std::snprintf(buf, sizeof buf, "%s##v%d_%u", label, static_cast<int>(view), folder);
+        char id[48];
+        std::snprintf(id, sizeof id, "##v%d_%u", static_cast<int>(view), folder);
         const ImVec2 p = ImGui::GetCursorScreenPos();
-        ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, ImVec2(0.0f, 0.5f));
-        const bool clicked = ImGui::Selectable(buf, on, ImGuiSelectableFlags_None, ImVec2(0, ImGui::GetTextLineHeight() * 1.6f));
-        ImGui::PopStyleVar();
-        if (clicked) {
+        if (ImGui::Selectable(id, on, ImGuiSelectableFlags_None, ImVec2(0, rowH))) {
             managerFilter_.view = view;
             managerFilter_.folder = folder;
             refilter();
         }
-        const std::string n = std::to_string(count);
-        const float w = ImGui::CalcTextSize(n.c_str()).x;
-        ImGui::GetWindowDrawList()->AddText(
-            ImVec2(p.x + ImGui::GetContentRegionAvail().x - w - 4, p.y + ImGui::GetTextLineHeight() * 0.3f),
-            on ? tc.selectedText : ImGui::GetColorU32(tc.dimText), n.c_str());
+        rowBackground(on, ImGui::IsItemHovered());
+        const float w = ImGui::GetItemRectSize().x;
+        const float cy = p.y + rowH * 0.5f;
+        const ImU32 text = ImGui::GetColorU32(ImGuiCol_Text);
+        const ImU32 iconColor = on ? text : tc.fileIcon;
+        const ImVec2 ic(p.x + em * 1.1f, cy);
+        if (icon == Icon::Clock) iconClock(ic, em * 0.45f, iconColor);
+        if (icon == Icon::Pin) iconPin(ic, em * 0.45f, iconColor);
+        if (icon == Icon::Folder) iconFolder(ic, em * 0.48f, iconColor);
+        const float pillW = countPill(p.x + w - em * 0.55f, cy, count);
+        clippedText(ImVec2(p.x + em * 2.2f, std::round(cy - lineH * 0.5f)), p.x + w - pillW - em * 0.9f, label, text);
     };
 
-    entry("History", countAll_, ClipFilter::View::History, 0);
+    ImGui::Dummy(ImVec2(0, em * 0.1f));
+    entry("History", countAll_, ClipFilter::View::History, 0, Icon::Clock);
     dropTarget(kViewHistory, 0);
-    entry("Pinned", countPinned_, ClipFilter::View::Pinned, 0);
+    entry("Pinned", countPinned_, ClipFilter::View::Pinned, 0, Icon::Pin);
     dropTarget(kViewPinned, 0);
 
-    ImGui::Spacing();
-    ImGui::TextColored(tc.dimText, "FOLDERS");
-    ImGui::SameLine();
-    ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - ImGui::CalcTextSize("+").x -
-                         ImGui::GetStyle().FramePadding.x * 2);
-    if (ImGui::SmallButton("+")) {
+    // "Folders" with a round + at the end of the line
+    ImGui::Dummy(ImVec2(0, em * 0.6f));
+    const ImVec2 hp = ImGui::GetCursorScreenPos();
+    ImGui::SetCursorScreenPos(ImVec2(hp.x + em * 0.5f, hp.y));
+    sectionLabel("Folders");
+    const float plusR = std::round(lineH * 0.55f);
+    const ImVec2 plusC(hp.x + ImGui::GetContentRegionAvail().x - em * 0.55f - plusR, hp.y + lineH * 0.5f);
+    ImGui::SetCursorScreenPos(ImVec2(plusC.x - plusR, plusC.y - plusR));
+    if (ImGui::InvisibleButton("new_folder", ImVec2(plusR * 2, plusR * 2))) {
         renamingFolder_ = 0;
         moveAfterCreate_ = 0;
         folderNameEdit_.clear();
         openFolderName_ = true;
     }
+    {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const bool hot = ImGui::IsItemHovered();
+        const ImU32 col = hot ? ImGui::GetColorU32(ImGuiCol_Text) : ImGui::GetColorU32(tc.dimText);
+        if (hot) dl->AddCircleFilled(plusC, plusR, tc.hover, 20);
+        dl->AddCircle(plusC, plusR, tc.hairline, 20, 1.0f);
+        const float s = plusR * 0.45f, t = strokeWidth();
+        dl->AddLine(ImVec2(plusC.x - s, plusC.y), ImVec2(plusC.x + s, plusC.y), col, t);
+        dl->AddLine(ImVec2(plusC.x, plusC.y - s), ImVec2(plusC.x, plusC.y + s), col, t);
+    }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("New folder");
+    ImGui::SetCursorScreenPos(ImVec2(hp.x, hp.y + lineH + ImGui::GetStyle().ItemSpacing.y));
 
     const std::vector<Folder>& folders = store_.folders();
-    if (folders.empty()) hint("Drag clips here to keep them. Folders never get cleaned up.");
+    if (folders.empty()) {
+        ImGui::Indent(em * 0.5f);
+        hint("Drag clips here to keep them. Folders never get cleaned up.");
+        ImGui::Unindent(em * 0.5f);
+    }
     uint32_t removeFolder = 0;
     for (size_t i = 0; i < folders.size(); ++i) {
         const Folder& f = folders[i];
-        entry(f.name.c_str(), i < folderCounts_.size() ? folderCounts_[i] : 0, ClipFilter::View::Folder, f.id);
+        entry(f.name.c_str(), i < folderCounts_.size() ? folderCounts_[i] : 0, ClipFilter::View::Folder, f.id, Icon::Folder);
         dropTarget(kViewFolder, f.id);
         if (ImGui::BeginPopupContextItem()) {
             if (ImGui::MenuItem("Rename...")) {
@@ -931,21 +1156,40 @@ void App::drawSidebar() {
     }
     if (removeFolder) store_.removeFolder(removeFolder);
 
-    // type filter at the bottom
-    const float typesH = ImGui::GetFrameHeightWithSpacing() * 4 + ImGui::GetTextLineHeightWithSpacing();
-    ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY(), ImGui::GetWindowHeight() - typesH));
-    ImGui::TextColored(tc.dimText, "SHOW");
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(ImGui::GetStyle().FramePadding.x, 2.0f));
-    int type = static_cast<int>(managerFilter_.type);
-    bool changed = ImGui::RadioButton("Everything", &type, static_cast<int>(ClipFilter::Type::Any));
-    changed |= ImGui::RadioButton("Text", &type, static_cast<int>(ClipFilter::Type::Text));
-    changed |= ImGui::RadioButton("Images", &type, static_cast<int>(ClipFilter::Type::Image));
-    changed |= ImGui::RadioButton("Files", &type, static_cast<int>(ClipFilter::Type::Files));
-    ImGui::PopStyleVar();
-    if (changed) {
-        managerFilter_.type = static_cast<ClipFilter::Type>(type);
-        refilter();
+    // type filter at the bottom, same rows without counts
+    const float typesH = rowH * 4 + ImGui::GetStyle().ItemSpacing.y * 4 + lineH + em * 0.5f;
+    ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY() + em, ImGui::GetWindowHeight() - typesH));
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + em * 0.5f);
+    sectionLabel("Show");
+    const struct {
+        const char* label;
+        ClipFilter::Type type;
+    } types[] = {{"Everything", ClipFilter::Type::Any},
+                 {"Text", ClipFilter::Type::Text},
+                 {"Images", ClipFilter::Type::Image},
+                 {"Files", ClipFilter::Type::Files}};
+    const float typeH = std::round(lineH * 1.75f);
+    for (const auto& t : types) {
+        const bool on = managerFilter_.type == t.type;
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        ImGui::PushID(t.label);
+        if (ImGui::Selectable("##type", on, ImGuiSelectableFlags_None, ImVec2(0, typeH))) {
+            managerFilter_.type = t.type;
+            refilter();
+        }
+        ImGui::PopID();
+        rowBackground(on, ImGui::IsItemHovered());
+        const float cy = p.y + typeH * 0.5f;
+        // a dot like a radio, filled with the accent when on
+        const ImVec2 dot(p.x + em * 1.1f, cy);
+        if (on)
+            ImGui::GetWindowDrawList()->AddCircleFilled(dot, em * 0.2f, tc.accent, 12);
+        else
+            ImGui::GetWindowDrawList()->AddCircle(dot, em * 0.2f, tc.fileIcon, 12, 1.0f);
+        ImGui::GetWindowDrawList()->AddText(ImVec2(p.x + em * 2.2f, std::round(cy - lineH * 0.5f)),
+                                            on ? ImGui::GetColorU32(ImGuiCol_Text) : ImGui::GetColorU32(tc.dimText), t.label);
     }
+    popRowColors();
 }
 
 void App::drawClipContextMenu(const Clip& clip) {
@@ -971,8 +1215,7 @@ void App::drawClipContextMenu(const Clip& clip) {
     if (clip.kind == ClipKind::Files) {
         const std::vector<std::string> paths = clipPaths(clip);
         if (!paths.empty() && ImGui::MenuItem("Open containing folder")) {
-            const std::string parent = std::filesystem::path(paths[0]).parent_path().string();
-            if (!posix::spawnDetached({"xdg-open", parent})) setStatus("Could not open " + parent);
+            if (!showInFileManager(paths[0])) setStatus("Could not open the folder of " + paths[0]);
         }
     }
     ImGui::Separator();
@@ -985,17 +1228,19 @@ void App::drawClipList() {
     const ImGuiStyle& style = ImGui::GetStyle();
     const float em = ImGui::GetFontSize();
 
-    ImGui::SetNextItemWidth(-1);
     if (focusManagerSearch_) {
         ImGui::SetKeyboardFocusHere();
         focusManagerSearch_ = false;
     }
-    if (ImGui::InputTextWithHint("##search", "Search (Ctrl+F)", &managerFilter_.query)) refilter();
+    if (searchField("##search", "Search  (Ctrl+F)", &managerFilter_.query, -1)) refilter();
     managerSearchId_ = ImGui::GetItemID();
+    ImGui::Dummy(ImVec2(0, em * 0.1f));
 
     const float lineH = ImGui::GetTextLineHeight();
-    const float rowH = std::round(lineH * 2.6f);
-    const float thumbS = rowH - style.FramePadding.y * 2;
+    const float rowH = std::round(lineH * 2.9f);
+    const float thumbS = std::round(rowH - style.FramePadding.y * 2.2f);
+    const float rowGap = std::round(em * 0.2f);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(style.ItemSpacing.x, rowGap));
     ImGui::BeginChild("rows", ImVec2(0, 0), ImGuiChildFlags_None);
     if (managerResults_.empty()) {
         ImGui::Spacing();
@@ -1005,8 +1250,9 @@ void App::drawClipList() {
                                                                     : "Empty folder. Drag clips onto it in the sidebar.");
     }
 
+    pushRowColors();
     ImGuiListClipper clip;
-    clip.Begin(static_cast<int>(managerResults_.size()), rowH + style.ItemSpacing.y);
+    clip.Begin(static_cast<int>(managerResults_.size()), rowH + rowGap);
     int selectedRow = -1;
     if (scrollToSelected_) {
         auto it = std::find(managerResults_.begin(), managerResults_.end(), selectedId_);
@@ -1026,6 +1272,7 @@ void App::drawClipList() {
                 selectedId_ = c->id;
                 if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) copyToClipboard(c->id);
             }
+            rowBackground(selected, ImGui::IsItemHovered());
             if (row == selectedRow && scrollToSelected_) {
                 ImGui::SetScrollHereY(0.5f);
                 scrollToSelected_ = false;
@@ -1037,39 +1284,47 @@ void App::drawClipList() {
             }
             drawClipContextMenu(*c);
 
-            const float x1 = p.x + ImGui::GetContentRegionAvail().x;
-            const ImU32 text = selected ? tc.selectedText : ImGui::GetColorU32(ImGuiCol_Text);
-            const ImU32 dim = selected ? withAlpha(tc.selectedText, 0.75f) : ImGui::GetColorU32(tc.dimText);
+            const float x1 = p.x + ImGui::GetItemRectSize().x;
+            const ImU32 text = ImGui::GetColorU32(ImGuiCol_Text);
+            const ImU32 dim = ImGui::GetColorU32(tc.dimText);
             ImDrawList* dl = ImGui::GetWindowDrawList();
 
-            float x = p.x + style.FramePadding.x;
-            const float s = c->kind == ClipKind::Image ? thumbS : std::round(lineH * 1.3f);
-            drawKindIcon(*c, ImVec2(x + (thumbS - s) * 0.5f, p.y + (rowH - s) * 0.5f), s, selected);
-            x += thumbS + em * 0.7f;
+            // icon / thumbnail on a small tile
+            float x = p.x + std::round(em * 0.55f);
+            const ImVec2 tile(x, p.y + (rowH - thumbS) * 0.5f);
+            if (c->kind != ClipKind::Image)
+                dl->AddRectFilled(tile, ImVec2(tile.x + thumbS, tile.y + thumbS), tc.pill, style.FrameRounding);
+            const float s = c->kind == ClipKind::Image ? thumbS : std::round(lineH * 1.15f);
+            drawKindIcon(*c, ImVec2(tile.x + (thumbS - s) * 0.5f, tile.y + (thumbS - s) * 0.5f), s, selected);
+            x += thumbS + em * 0.75f;
 
-            const float y1 = p.y + (rowH - lineH * 2 - style.ItemSpacing.y * 0.3f) * 0.5f;
-            const float y2 = y1 + lineH + style.ItemSpacing.y * 0.3f;
-            float right = x1 - style.FramePadding.x;
+            // title line with the age on the right, details under it
+            const float y1 = std::round(p.y + (rowH - lineH * 2 - em * 0.25f) * 0.5f);
+            const float y2 = std::round(y1 + lineH + em * 0.25f);
+            const std::string age = formatAge(c->lastUsed);
+            const float ageW = ImGui::CalcTextSize(age.c_str()).x;
+            float right = x1 - em * 0.75f - ageW;
+            dl->AddText(ImVec2(right, y1), dim, age.c_str());
             if (c->pinned) {
-                right -= em * 0.7f;
-                dl->AddCircleFilled(ImVec2(right + em * 0.3f, y1 + lineH * 0.5f), em * 0.22f,
-                                    selected ? tc.selectedText : tc.folderIcon);
-                right -= em * 0.4f;
+                right -= em * 1.1f;
+                iconPin(ImVec2(right + em * 0.45f, y1 + lineH * 0.5f), em * 0.42f, tc.accent, true);
             }
-            clippedText(ImVec2(x, y1), right, c->title.empty() ? previewLine(*c, 300) : c->title, text);
+            clippedText(ImVec2(x, y1), right - em * 0.6f, c->title.empty() ? previewLine(*c, 300) : c->title, text);
 
-            std::string meta = formatAge(c->lastUsed);
-            if (!c->source.empty()) meta += "  ·  " + c->source;
-            if (const Folder* f = c->folder ? store_.findFolder(c->folder) : nullptr) meta += "  ·  " + f->name;
-            if (c->kind == ClipKind::Text) meta += "  ·  " + formatSize(c->bytes);
-            if (c->kind == ClipKind::Image) meta += "  ·  " + std::to_string(c->width) + " × " + std::to_string(c->height);
-            if (c->kind == ClipKind::Files && c->cut) meta += "  ·  cut";
-            if (!c->title.empty() && c->kind != ClipKind::Image) meta += "  ·  " + previewLine(*c, 120);  // images: size is there already
-            clippedText(ImVec2(x, y2), x1 - style.FramePadding.x, meta, dim);
+            std::string meta = c->source;
+            auto add = [&](const std::string& part) { meta += (meta.empty() ? "" : "  ·  ") + part; };
+            if (const Folder* f = c->folder ? store_.findFolder(c->folder) : nullptr) add(f->name);
+            if (c->kind == ClipKind::Text) add(formatSize(c->bytes));
+            if (c->kind == ClipKind::Image) add(std::to_string(c->width) + " × " + std::to_string(c->height));
+            if (c->kind == ClipKind::Files && c->cut) add("cut");
+            if (!c->title.empty() && c->kind != ClipKind::Image) add(previewLine(*c, 120));  // images: size is there already
+            clippedText(ImVec2(x, y2), x1 - em * 0.75f, meta, dim);
             ImGui::PopID();
         }
     }
+    popRowColors();
     ImGui::EndChild();
+    ImGui::PopStyleVar();
 }
 
 void App::drawDetails() {
@@ -1097,11 +1352,11 @@ void App::drawDetails() {
         focusTitle_ = false;
     }
     ImGui::SetNextItemWidth(-1);
-    ImGui::InputTextWithHint("##title", "Title (F2)", &titleEdit_);
+    ImGui::InputTextWithHint("##title", "Add a title  (F2)", &titleEdit_);
     if (ImGui::IsItemDeactivatedAfterEdit()) store_.setTitle(c->id, titleEdit_);
 
     bool pinned = c->pinned;
-    if (ImGui::Checkbox("Pinned", &pinned)) store_.setPinned(c->id, pinned);
+    if (toggleSwitch("Pinned", &pinned)) store_.setPinned(c->id, pinned);
     ImGui::SameLine();
     const Folder* folder = c->folder ? store_.findFolder(c->folder) : nullptr;
     ImGui::SetNextItemWidth(em * 9);
@@ -1112,7 +1367,11 @@ void App::drawDetails() {
         }
         ImGui::EndCombo();
     }
-    ImGui::SameLine();
+    // actions on the right end of the line
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float actionsW = ImGui::CalcTextSize("Copy").x + ImGui::CalcTextSize("Delete").x + style.FramePadding.x * 4 +
+                           style.ItemSpacing.x;
+    ImGui::SameLine(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - actionsW));
     if (ImGui::Button("Copy")) copyToClipboard(c->id);
     ImGui::SameLine();
     if (ImGui::Button("Delete")) {
@@ -1124,7 +1383,7 @@ void App::drawDetails() {
     if (!c->source.empty()) info += " from " + c->source;
     info += "  ·  first " + formatTime(c->created) + "  ·  used " + std::to_string(c->useCount) + "×";
     ImGui::TextColored(tc.dimText, "%s", info.c_str());
-    ImGui::Separator();
+    ImGui::Dummy(ImVec2(0, em * 0.1f));
 
     const float footer = ImGui::GetFrameHeightWithSpacing();
     if (c->kind == ClipKind::Text && c->text.size() <= kMaxEditableText) {
@@ -1144,8 +1403,7 @@ void App::drawDetails() {
         if (c->kind == ClipKind::Files) {
             const std::vector<std::string> paths = clipPaths(*c);
             if (!paths.empty() && ImGui::Button("Open containing folder")) {
-                const std::string parent = std::filesystem::path(paths[0]).parent_path().string();
-                if (!posix::spawnDetached({"xdg-open", parent})) setStatus("Could not open " + parent);
+                if (!showInFileManager(paths[0])) setStatus("Could not open the folder of " + paths[0]);
             }
             ImGui::SameLine();
             ImGui::TextColored(tc.dimText, "Paste into a folder in your file manager to copy them there");
@@ -1164,7 +1422,11 @@ void App::drawStatusBar() {
     else if (!storeError_.empty())
         left = "History is not being saved: " + storeError_;
     else if (!clipboard_->available())
+#ifdef _WIN32
+        left = "Can't watch the clipboard, nothing gets captured";
+#else
         left = "No X11 clipboard, nothing gets captured (Wayland isn't supported yet)";
+#endif
     else if (!settings_.capturing)
         left = "Paused, copies aren't saved. Clipper > Pause capturing to resume";
     else
@@ -1234,7 +1496,11 @@ void App::drawModals() {
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     if (ImGui::BeginPopupModal("About Clipper", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::Text("Clipper %s", CLIPPER_VERSION);
-        hint("Clipboard history for Linux, inspired by ClipClip.");
+#ifdef _WIN32
+        hint("Clipboard history for Windows and Linux, inspired by ClipClip.");
+#else
+        hint("Clipboard history for Linux and Windows, inspired by ClipClip.");
+#endif
         ImGui::TextColored(themeColors().dimText, "History: %s", dataDirectory().c_str());
         ImGui::Spacing();
         if (ImGui::Button("Close", ImVec2(em * 6, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
@@ -1288,6 +1554,67 @@ void App::drawModals() {
         if (ImGui::Button("Close", ImVec2(em * 6, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
             ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
+    }
+}
+
+// ---- screenshots ----
+
+void App::showcase(bool popup) {
+    if (store_.clips().empty()) {
+        // what a few days of copying looks like. oldest first, every clip a few minutes after the one before
+        const int64_t now = nowMs();
+        int64_t t = now - (3070 + 2) * 60 * 1000LL;  // the minutes below add up to 3070: the newest is from just now
+        auto add = [&](ClipKind kind, std::string text, const char* source, int64_t minutesLater, std::string png = {}) {
+            t = std::min(now - 60 * 1000, t + minutesLater * 60 * 1000);
+            NewClip c;
+            c.kind = kind;
+            c.text = std::move(text);
+            c.png = std::move(png);
+            c.source = source;
+            return store_.add(std::move(c), t);
+        };
+#ifdef _WIN32
+        const char *terminal = "WindowsTerminal", *browser = "chrome", *editor = "Code", *chat = "Slack",
+                   *files = "explorer", *paint = "mspaint", *mail = "OUTLOOK";
+        const std::string report = "file:///C:/Users/Public/Documents/Report%202026.pdf\nfile:///C:/Users/Public/Documents/Budget.xlsx";
+#else
+        const char *terminal = "Gnome-terminal", *browser = "firefox", *editor = "Code", *chat = "Slack", *files = "Nemo",
+                   *paint = "Gimp-2.10", *mail = "thunderbird";
+        const std::string report = "file:///home/sam/Documents/Report%202026.pdf\nfile:///home/sam/Documents/Budget.ods";
+#endif
+        const uint32_t snippets = store_.addFolder("Snippets");
+        const uint32_t work = store_.addFolder("Work");
+        const uint64_t reply = add(ClipKind::Text,
+                                   "Thanks for reaching out! I'm away until Monday and will get back to you then.", mail, 0);
+        store_.setTitle(reply, "Out of office");
+        store_.setFolder(reply, snippets);
+        add(ClipKind::Text, "#1F9EDE", editor, 400);
+        const uint64_t addr = add(ClipKind::Text, "221B Baker Street\nLondon NW1 6XE\nUnited Kingdom", mail, 300);
+        store_.setTitle(addr, "Shipping address");
+        store_.setFolder(addr, snippets);
+        add(ClipKind::Files, report, files, 700);
+        const uint64_t notes = add(ClipKind::Text,
+                                   "Standup moved to 10:30. Demo on Thursday, bring the release notes and the new screenshots.",
+                                   chat, 200);
+        store_.setFolder(notes, work);
+        add(ClipKind::Image, {}, paint, 900, std::string(reinterpret_cast<const char*>(kAppIconPng), sizeof kAppIconPng));
+        const uint64_t link = add(ClipKind::Text, "https://github.com/KimsFerdy/Clipper/releases/latest", browser, 400);
+        store_.setPinned(link, true);
+        add(ClipKind::Text, "for (const Clip& c : store.clips())\n    total += c.bytes;", editor, 120);
+        add(ClipKind::Text, "git log --oneline --graph --decorate -20", terminal, 30);
+        add(ClipKind::Text, "Clipboard history that stays out of your way.", browser, 20);
+    }
+    refilter();
+    if (popup) {
+        popupFilter_ = {};
+        popupRow_ = 1;
+        refilter();
+        windowChanged(Mode::Popup);
+        popupFocusSearch_ = false;  // no blinking cursor in the picture
+    } else {
+        windowChanged(Mode::Manager);
+        focusManagerSearch_ = false;
+        if (managerResults_.size() > 1) selectedId_ = managerResults_[1];
     }
 }
 

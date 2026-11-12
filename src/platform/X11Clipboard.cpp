@@ -1,4 +1,4 @@
-#include "platform/X11Clipboard.h"
+#include "platform/Clipboard.h"
 
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
@@ -93,8 +93,8 @@ bool isBlank(const std::string& s) {
 
 }  // namespace
 
-struct X11Clipboard::Impl {
-    X11Clipboard& self;
+struct Clipboard::Impl {
+    Clipboard& self;
     Display* dpy = nullptr;
     Window root = 0, win = 0;
     Atom atoms[kAtomCount] = {};
@@ -141,7 +141,7 @@ struct X11Clipboard::Impl {
     bool restorePending = false;
     Clock::time_point restoreAt{};
 
-    explicit Impl(X11Clipboard& s) : self(s) {}
+    explicit Impl(Clipboard& s) : self(s) {}
     ~Impl() {
         if (dpy) XCloseDisplay(dpy);  // drops our selections with it
     }
@@ -579,30 +579,30 @@ struct X11Clipboard::Impl {
     }
 };
 
-X11Clipboard::X11Clipboard(std::function<void()> wake) : wake_(std::move(wake)) {
+Clipboard::Clipboard(std::function<void()> wake) : wake_(std::move(wake)) {
     wakeFd_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     thread_ = std::thread([this] { run(); });
 }
 
-X11Clipboard::~X11Clipboard() {
+Clipboard::~Clipboard() {
     stop_ = true;
     wakeThread();
     if (thread_.joinable()) thread_.join();
     if (wakeFd_ >= 0) close(wakeFd_);
 }
 
-void X11Clipboard::wakeThread() {
+void Clipboard::wakeThread() {
     if (wakeFd_ < 0) return;
     const uint64_t one = 1;
     [[maybe_unused]] ssize_t n = write(wakeFd_, &one, sizeof one);
 }
 
-std::vector<ClipboardData> X11Clipboard::takeCaptured() {
+std::vector<ClipboardData> Clipboard::takeCaptured() {
     std::lock_guard lock(mutex_);
     return std::exchange(captured_, {});
 }
 
-bool X11Clipboard::offer(ClipboardData data, bool primaryToo) {
+bool Clipboard::offer(ClipboardData data, bool primaryToo) {
     if (!available_) return false;
     auto cmd = std::make_unique<Command>();
     cmd->data = std::make_shared<const ClipboardData>(std::move(data));
@@ -616,7 +616,7 @@ bool X11Clipboard::offer(ClipboardData data, bool primaryToo) {
     return done.wait_for(std::chrono::seconds(1)) == std::future_status::ready && done.get();
 }
 
-void X11Clipboard::run() {
+void Clipboard::run() {
     Impl x(*this);
     if (!x.init()) {
         // still answer offer() calls with "no"

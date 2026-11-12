@@ -1,0 +1,80 @@
+<!--
+  WiX Toolset v5 MSI for Clipper (https://wixtoolset.org). Per user, no admin:
+  installs into %LOCALAPPDATA%\Programs\Clipper, same as the setup.exe.
+  Built by scripts\package-windows.ps1 (from inside installer\):
+    wix build Clipper.wxs -arch x64 -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext
+              -d Version=1.0.0 -d SourceDir=<staged folder> -o dist\Clipper-1.0.0-windows-x64.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <Package Name="Clipper" Manufacturer="Kimscode Studio" Version="$(Version)"
+           UpgradeCode="{832DE5F7-FDBC-4C53-A7E6-9873B4414BDF}" Scope="perUser">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Clipper is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="ClipperIcon" SourceFile="..\assets\clipper.ico" />
+    <Property Id="ARPPRODUCTICON" Value="ClipperIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/KimsFerdy/Clipper" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/KimsFerdy/Clipper/issues" />
+    <Property Id="ARPURLUPDATEINFO" Value="https://github.com/KimsFerdy/Clipper/releases" />
+
+    <!-- an update / uninstall while Clipper runs: ask it to close (WM_CLOSE to its windows = quit) -->
+    <util:CloseApplication Id="CloseClipper" Target="Clipper.exe" CloseMessage="yes" RebootPrompt="no" Timeout="5" />
+
+    <!-- %LOCALAPPDATA%\Programs\Clipper, where the setup.exe installs too. things in the user profile
+         want an HKCU key path (ICE38) and their folders removed on uninstall (ICE64) -->
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="Clipper">
+          <Component Id="App" Guid="{913032D6-9759-4DE3-8B6F-1D0F77C983D8}">
+            <File Id="ClipperExe" Source="$(SourceDir)\Clipper.exe" />
+            <File Id="LicenseTxt" Source="$(SourceDir)\LICENSE.txt" />
+            <File Id="ReadmeTxt" Source="$(SourceDir)\README.txt" />
+            <RegistryValue Root="HKCU" Key="Software\KimsFerdy\Clipper" Name="InstallDir" Type="string"
+                           Value="[INSTALLFOLDER]" KeyPath="yes" />
+            <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
+            <RemoveFolder Id="RemoveProgramsFolder" Directory="ProgramsFolder" On="uninstall" />
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut">
+        <Shortcut Id="ClipperShortcut" Name="Clipper" Description="Clipboard history" Target="[#ClipperExe]"
+                  WorkingDirectory="INSTALLFOLDER" Icon="ClipperIcon" />
+        <RegistryValue Root="HKCU" Key="Software\KimsFerdy\Clipper" Name="StartMenuShortcut" Type="integer" Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <!-- start at login, like Clipper's own first run does. the app removes it when turned off in Preferences,
+         the key path is a separate value so that never looks like a broken install. uninstall removes it -->
+    <Component Id="StartAtLogin" Directory="INSTALLFOLDER">
+      <RegistryValue Root="HKCU" Key="Software\KimsFerdy\Clipper" Name="Installed" Type="integer" Value="1" KeyPath="yes" />
+      <RegistryValue Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="Clipper" Type="string"
+                     Value="&quot;[INSTALLFOLDER]Clipper.exe&quot; --minimized" />
+      <RemoveRegistryKey Root="HKCU" Key="Software\KimsFerdy\Clipper" Action="removeOnUninstall" />
+    </Component>
+
+    <Feature Id="Main">
+      <ComponentRef Id="App" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="StartAtLogin" />
+    </Feature>
+
+    <!-- "Launch Clipper" checkbox on the last page -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Clipper" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <CustomAction Id="LaunchClipper" BinaryRef="Wix4UtilCA_X64" DllEntry="WixShellExec" Impersonate="yes" />
+    <Property Id="WixShellExecTarget" Value="[#ClipperExe]" />
+
+    <ui:WixUI Id="WixUI_Minimal" />
+    <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchClipper"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
+    </UI>
+  </Package>
+</Wix>

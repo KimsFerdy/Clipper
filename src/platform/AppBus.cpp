@@ -20,6 +20,8 @@ const char* kindName(AppBus::Request::Kind k) {
             return "toggle";
         case AppBus::Request::Kind::Popup:
             return "popup";
+        case AppBus::Request::Kind::Quit:
+            return "quit";
         case AppBus::Request::Kind::Show:
             break;
     }
@@ -39,6 +41,7 @@ struct AppBusDbus {
         const std::string_view k = kind;
         req.kind = k == "toggle"  ? AppBus::Request::Kind::Toggle
                    : k == "popup" ? AppBus::Request::Kind::Popup
+                   : k == "quit"  ? AppBus::Request::Kind::Quit
                                   : AppBus::Request::Kind::Show;
         req.search = search;
         static_cast<AppBus*>(userdata)->push(std::move(req));

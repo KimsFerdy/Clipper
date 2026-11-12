@@ -120,9 +120,14 @@ std::vector<uint64_t> filterClips(const ClipStore& store, const ClipFilter& filt
 }
 
 std::string baseName(const std::string& path) {
+#ifdef _WIN32
+    constexpr std::string_view seps = "/\\";
+#else
+    constexpr std::string_view seps = "/";
+#endif
     std::string_view p = path;
-    while (p.size() > 1 && p.back() == '/') p.remove_suffix(1);
-    const size_t slash = p.find_last_of('/');
+    while (p.size() > 1 && seps.find(p.back()) != std::string_view::npos) p.remove_suffix(1);
+    const size_t slash = p.find_last_of(seps);
     return std::string(slash == std::string_view::npos || p.size() == 1 ? p : p.substr(slash + 1));
 }
 

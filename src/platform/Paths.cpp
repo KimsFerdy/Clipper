@@ -31,8 +31,15 @@ std::string fileIn(const std::string& dir, const char* name) {
 
 }  // namespace
 
-std::string configDirectory() { return ensureDir(xdgDir("XDG_CONFIG_HOME", ".config")); }
-std::string dataDirectory() { return ensureDir(xdgDir("XDG_DATA_HOME", ".local/share")); }
+// $CLIPPER_HOME: settings + history both in there (screenshots, trying things without touching yours)
+std::string configDirectory() {
+    if (const char* home = std::getenv("CLIPPER_HOME"); home && *home) return ensureDir(fs::path(home));
+    return ensureDir(xdgDir("XDG_CONFIG_HOME", ".config"));
+}
+std::string dataDirectory() {
+    if (const char* home = std::getenv("CLIPPER_HOME"); home && *home) return ensureDir(fs::path(home));
+    return ensureDir(xdgDir("XDG_DATA_HOME", ".local/share"));
+}
 std::string settingsFilePath() { return fileIn(configDirectory(), "settings.ini"); }
 
 std::string executablePath() {

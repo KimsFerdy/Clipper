@@ -10,6 +10,10 @@
 #include "stb_image.h"
 // clang-format on
 
+#ifndef GL_CLAMP_TO_EDGE  // windows' gl.h stops at opengl 1.1
+#define GL_CLAMP_TO_EDGE 0x812F
+#endif
+
 namespace clipper {
 
 namespace {

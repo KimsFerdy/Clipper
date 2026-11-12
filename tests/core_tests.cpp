@@ -1,7 +1,6 @@
 // no framework yet, CHECK + exit code is enough for now
 
-#include <unistd.h>
-
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -30,7 +29,7 @@ namespace {
 struct TempDir {
     fs::path path;
     TempDir() {
-        path = fs::temp_directory_path() / ("clipper_test_" + std::to_string(getpid()) + "_" + std::to_string(counter++));
+        path = fs::temp_directory_path() / ("clipper_test_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "_" + std::to_string(counter++));
         fs::remove_all(path);
         fs::create_directories(path);
     }
@@ -286,7 +285,9 @@ static void testFileList() {
     CHECK(clipper::pathToUri("/home/me/My File#1.txt") == "file:///home/me/My%20File%231.txt");
     CHECK(clipper::uriToPath("file:///home/me/My%20File%231.txt") == "/home/me/My File#1.txt");
     CHECK(clipper::uriToPath("file://localhost/tmp/x") == "/tmp/x");
+#ifndef _WIN32
     CHECK(clipper::uriToPath("file://otherhost/tmp/x").empty());
+#endif
     CHECK(clipper::uriToPath("https://example.com/").empty());
     CHECK(clipper::uriToPath("file:///100%") == "/100%");  // broken escape stays as is
 
@@ -307,6 +308,16 @@ static void testFileList() {
     CHECK(clipper::clipPaths(c) == std::vector<std::string>{"/tmp/a b"});
     CHECK(clipper::baseName("/home/me/dir/") == "dir");
     CHECK(clipper::baseName("/") == "/");
+#ifdef _WIN32
+    CHECK(clipper::pathToUri(R"(C:\Users\me\My File.txt)") == "file:///C:/Users/me/My%20File.txt");
+    CHECK(clipper::uriToPath("file:///C:/Users/me/My%20File.txt") == R"(C:\Users\me\My File.txt)");
+    CHECK(clipper::pathToUri(R"(\\nas\share\a.txt)") == "file://nas/share/a.txt");
+    CHECK(clipper::uriToPath("file://nas/share/a.txt") == R"(\\nas\share\a.txt)");
+    CHECK(clipper::uriToPath(clipper::pathToUri(R"(D:\x\été #1)")) == R"(D:\x\été #1)");
+    CHECK(clipper::baseName(R"(C:\Users\me\dir\)") == "dir");
+    c.text = "file:///C:/tmp/a%20b";
+    CHECK(clipper::clipPaths(c) == std::vector<std::string>{R"(C:\tmp\a b)"});
+#endif
 }
 
 static void testPngSize() {

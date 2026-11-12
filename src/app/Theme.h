@@ -5,12 +5,21 @@
 
 namespace clipper {
 
-// colours imgui's style doesn't have a slot for
+// colours imgui's style doesn't have a slot for. the look: neutral greys, the window background behind
+// rounded cards with hairline borders, selection = a soft raised pill. the accent only for small things
 struct ThemeColors {
-    ImU32 folderIcon;
-    ImU32 fileIcon;
-    ImU32 selectedText;
-    ImVec4 dimText;
+    ImU32 folderIcon;    // folders in the list
+    ImU32 fileIcon;      // outline icons (text clips, sidebar)
+    ImU32 selectedText;  // text on a selected row
+    ImVec4 dimText;      // secondary text: ages, sizes, hints
+    ImU32 faint;         // section labels, key hints
+    ImU32 panel;         // cards (list, details, popup)
+    ImU32 raised;        // selected rows, inputs, buttons
+    ImU32 hover;         // rows under the mouse
+    ImU32 hairline;      // card and selection borders
+    ImU32 pill;          // count badges
+    ImU32 accent;
+    bool dark;
 };
 
 // scale = monitor content scale

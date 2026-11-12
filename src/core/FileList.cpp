@@ -17,9 +17,23 @@ int hexValue(char c) {
 
 std::string pathToUri(std::string_view path) {
     static const char* hex = "0123456789ABCDEF";
+#ifdef _WIN32
+    // C:\a b -> file:///C:/a%20b, \\server\share\x -> file://server/share/x
+    std::string p(path);
+    for (char& c : p) {
+        if (c == '\\') c = '/';
+    }
+    const bool unc = p.rfind("//", 0) == 0;
+    if (!unc && p.size() >= 2 && p[1] == ':') p.insert(0, "/");
+    path = p;
+    std::string out = unc ? "file:" : "file://";
+    constexpr bool windows = true;
+#else
     std::string out = "file://";
+    constexpr bool windows = false;
+#endif
     for (unsigned char c : path) {
-        if (std::isalnum(c) || c == '/' || c == '-' || c == '_' || c == '.' || c == '~')
+        if (std::isalnum(c) || c == '/' || c == '-' || c == '_' || c == '.' || c == '~' || (windows && c == ':'))
             out += static_cast<char>(c);
         else {
             out += '%';
@@ -38,9 +52,13 @@ std::string uriToPath(std::string_view uri) {
     const size_t slash = uri.find('/');
     if (slash == std::string_view::npos) return {};
     const std::string_view host = uri.substr(0, slash);
-    if (!host.empty() && host != "localhost") return {};
-    uri.remove_prefix(slash);
     std::string out;
+#ifdef _WIN32
+    if (!host.empty() && host != "localhost") out = "//" + std::string(host);  // a share: \\host\...
+#else
+    if (!host.empty() && host != "localhost") return {};
+#endif
+    uri.remove_prefix(slash);
     for (size_t i = 0; i < uri.size(); ++i) {
         if (uri[i] == '%' && i + 2 < uri.size()) {
             const int hi = hexValue(uri[i + 1]), lo = hexValue(uri[i + 2]);
@@ -52,6 +70,16 @@ std::string uriToPath(std::string_view uri) {
         }
         out += uri[i];
     }
+#ifdef _WIN32
+    // /C:/a -> C:\a, //host/share -> \\host\share. anything else (not ours) stays as it is
+    const bool drive = out.size() >= 3 && out[0] == '/' && std::isalpha(static_cast<unsigned char>(out[1])) && out[2] == ':';
+    if (drive) out.erase(0, 1);
+    if (drive || out.rfind("//", 0) == 0) {
+        for (char& c : out) {
+            if (c == '/') c = '\\';
+        }
+    }
+#endif
     return out;
 }
 

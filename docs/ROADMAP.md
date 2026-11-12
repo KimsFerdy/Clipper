@@ -9,6 +9,9 @@
 - [x] password manager hint, excluded apps, pause
 - [x] tray, autostart, single instance, global shortcut (Cinnamon / GNOME)
 
+## 1.0
+- [x] Windows: clipboard, popup + auto-paste, tray, hotkey, autostart, setup.exe / msi / zip
+
 ## Next
 - [ ] multi-select in the manager (delete / move many)
 - [ ] paste as plain text (strip formatting) once rich text (text/html) is captured
@@ -17,4 +20,3 @@
 - [ ] snippets: clips with placeholders like {date}
 - [ ] import / export folders
 - [ ] Wayland (wlr-data-control / ext-data-control)
-- [ ] .deb / AppImage packaging like FindEverything

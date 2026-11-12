@@ -41,9 +41,6 @@ FetchContent_Declare(stb
     GIT_REPOSITORY https://github.com/nothings/stb.git
     GIT_TAG        2c980bb59875b0d32144a71867fbdebb2f77cd20
 )
-FetchContent_GetProperties(stb)
-if(NOT stb_POPULATED)
-    FetchContent_Populate(stb)
-endif()
+FetchContent_MakeAvailable(stb)  # no CMakeLists.txt in there, so this only downloads it
 add_library(image_decoders INTERFACE)
 target_include_directories(image_decoders SYSTEM INTERFACE ${stb_SOURCE_DIR})

@@ -1,12 +1,17 @@
-# Architecture
+| clipboard  | `Clipboard` (X11Clipboard.cpp): # Architecture
 
 ```
 src/
   core/       clips, the history journal, search, file uris, png size. plain c++, no os calls
-  platform/   x11 clipboard + desktop, tray, d-bus single instance, global shortcut, xdg, autostart
-  app/        imgui gui: popup, manager, preferences, thumbnails
+  platform/   one header per job (Clipboard, Desktop, Tray, AppBus, GlobalShortcut, Paths, Autostart,
+              Appearance, Shell), implemented twice: X11* / plain names for linux, Win32* for windows
+  app/        imgui gui: popup, manager, preferences, thumbnails. shared, a few #ifdef _WIN32 for wording
+data/windows/ clipper.rc.in (icon + version info), clipper.manifest (utf-8 code page, per-monitor dpi)
+installer/    Clipper.iss (Inno Setup), Clipper.wxs (WiX)
 tests/        core tests
 ```
+
+The rest of this file is about Linux. Windows is at the end.
 
 ## Threads
 
@@ -73,3 +78,22 @@ Images aren't in the journal: `images/<content hash>.png`, removed together with
 content copied again (same hash) moves the existing clip to the top instead of adding a new one.
 
 Pinned clips and clips in folders are "kept": never pruned by the history limit, never cleared.
+
+## Windows
+
+Same app, same core, same imgui code. The platform layer is Win32 only, no extra libraries:
+
+| piece          | how                                                                                          |
+|----------------|----------------------------------------------------------------------------------------------|
+| clipboard      | message-only window on its own thread, `AddClipboardFormatListener`. After a change it waits 60 ms (apps add formats one by one, and keep the clipboard open a moment), then copies out one of: `CF_HDROP` (+ `Preferred DropEffect` for cut), `CF_UNICODETEXT`, `PNG`, `CF_DIBV5` / `CF_DIB` (encoded to png with stb_image_write). Same order as on linux |
+| secrets        | skipped when `ExcludeClipboardContentFromMonitorProcessing`, `Clipboard Viewer Ignore` or `CanIncludeInClipboardHistory = 0` are there |
+| our own copies | everything goes on the clipboard right away (no delayed rendering), so it outlives us. Its sequence number is remembered so the listener skips it |
+| single instance | named mutex `Local\io.github.KimsFerdy.Clipper` + hidden window `ClipperAppBus`. A second launch sends its request as `WM_COPYDATA` and exits |
+| shortcut       | `RegisterHotKey` on that same window, set again on every start. `WM_HOTKEY` = popup, no second process |
+| closing        | that window turns `WM_ENDSESSION` (log off, Restart Manager) and `WM_CLOSE` into Quit. Installers run `Clipper --quit` |
+| paste          | `SetForegroundWindow` (with `AttachThreadInput` if windows says no), wait until it's active, `SendInput` Ctrl+V. Held Alt / Win get a Ctrl tap before they're released, so no menu bar / start menu |
+| tray           | `Shell_NotifyIcon` from a hidden top-level window (message-only ones miss `TaskbarCreated`), icon `GLFW_ICON` from the exe |
+| paths          | `%LOCALAPPDATA%\Clipper` (history, images), `%APPDATA%\Clipper\settings.ini`. All strings stay utf-8: the manifest makes utf-8 the process code page, so the core's `fopen` / `std::filesystem` work with any user name |
+| file uris      | `C:\a b` ↔ `file:///C:/a%20b`, `\nas\share` ↔ `file://nas/share` (FileList.cpp, `#ifdef _WIN32`) |
+
+The exe links the CRT statically and only needs system DLLs.

@@ -7,6 +7,7 @@ namespace clipper {
 // xdg dirs, created if missing. "" if HOME isn't set or mkdir fails
 std::string configDirectory();  // $XDG_CONFIG_HOME/clipper (~/.config/clipper)
 std::string dataDirectory();    // $XDG_DATA_HOME/clipper   (~/.local/share/clipper), the history lives here
+// both are $CLIPPER_HOME instead when that's set
 
 std::string settingsFilePath();  // <config>/settings.ini
 

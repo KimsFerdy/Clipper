@@ -155,7 +155,7 @@ void PreferencesDialog::drawGeneralTab() {
     ImGui::Indent();
     hint(
         "Clipper puts the clip on the clipboard, goes back to the app you were in and presses Ctrl+V for you "
-        "(Shift+Insert in terminals). Off: it only goes on the clipboard and you paste yourself.");
+        "(Shift+Insert in terminals that want it). Off: it only goes on the clipboard and you paste yourself.");
     ImGui::Unindent();
 }
 
@@ -180,7 +180,9 @@ void PreferencesDialog::drawShortcutRecorder() {
     }
 
     ImGui::Indent();
-    if (desktop == ShortcutDesktop::Unsupported) {
+    if (desktop == ShortcutDesktop::Windows) {
+        hint("Opens the history popup at the mouse from any app, while Clipper runs. Ctrl+V keeps pasting as usual.");
+    } else if (desktop == ShortcutDesktop::Unsupported) {
         hint(
             "Can't set it up automatically here. Add a shortcut in your desktop's keyboard settings "
             "that runs: Clipper --popup");
@@ -213,9 +215,15 @@ void PreferencesDialog::drawHistoryTab() {
     ImGui::Spacing();
     ImGui::Spacing();
     ImGui::TextUnformatted("Never save copies from these apps");
+#ifdef _WIN32
+    hint(
+        "Program names without .exe, any case (password managers). Copies that mark themselves as secret "
+        "(KeePassXC and KeePass do) are always skipped.");
+#else
     hint(
         "Window class names, any case (password managers). Copies that mark themselves as secret "
         "(KeePassXC does) are always skipped.");
+#endif
 
     auto& apps = draft_.excludedApps;
     for (size_t i = 0; i < apps.size(); ++i) {

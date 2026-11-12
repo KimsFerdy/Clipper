@@ -19,23 +19,26 @@ struct ClipboardData {
     std::string text;  // text, or file:// uris one per line
     std::string png;
     bool cut = false;    // files
-    std::string source;  // captures only: WM_CLASS of the app that had focus
+    std::string source;  // captures only: WM_CLASS (linux) / exe name (windows) of the app it came from
 };
 
-// the CLIPBOARD selection, on its own thread with its own X connection:
+// linux (X11Clipboard.cpp): the CLIPBOARD selection, on its own thread with its own X connection:
 // - watches it with XFixes (no polling) and reads whatever got copied: text, image/png, or files
 //   (x-special/gnome-copied-files, what nemo / nautilus / caja put there)
 // - owns it when we paste something from the history and answers other apps' requests,
 //   INCR for the big ones (screenshots)
 // - keeps the last copy alive when the app it came from quits
-class X11Clipboard {
+//
+// windows (Win32Clipboard.cpp): a message-only window on its own thread. AddClipboardFormatListener
+// tells it about copies, it reads CF_HDROP / CF_UNICODETEXT / PNG / CF_DIB and puts ours back the same way
+class Clipboard {
 public:
-    explicit X11Clipboard(std::function<void()> wake);
-    ~X11Clipboard();
-    X11Clipboard(const X11Clipboard&) = delete;
-    X11Clipboard& operator=(const X11Clipboard&) = delete;
+    explicit Clipboard(std::function<void()> wake);
+    ~Clipboard();
+    Clipboard(const Clipboard&) = delete;
+    Clipboard& operator=(const Clipboard&) = delete;
 
-    bool available() const { return available_; }  // false: no X display / no XFixes
+    bool available() const { return available_; }  // false: no X display / no XFixes / no window
     std::vector<ClipboardData> takeCaptured();
 
     void setCapturing(bool on) { capturing_ = on; }
@@ -57,7 +60,11 @@ private:
     void wakeThread();
 
     std::function<void()> wake_;
+#ifdef _WIN32
+    std::atomic<void*> hwnd_{nullptr};  // the listener window, commands get posted to it
+#else
     int wakeFd_ = -1;  // eventfd, pokes the x thread out of poll()
+#endif
     std::atomic<bool> stop_{false};
     std::atomic<bool> available_{false};
     std::atomic<bool> capturing_{true};

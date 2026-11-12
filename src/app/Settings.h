@@ -13,7 +13,7 @@ struct WindowGeometry {
     bool operator==(const WindowGeometry&) const = default;
 };
 
-// ~/.config/clipper/settings.ini, plain key = value so you can edit it by hand
+// ~/.config/clipper/settings.ini (windows: %APPDATA%\Clipper\settings.ini), plain key = value so you can edit it by hand
 struct Settings {
     enum class Theme { System, Dark, Light };
 
@@ -29,7 +29,11 @@ struct Settings {
     bool capturing = true;  // tray > Pause capturing
     bool captureImages = true;
     int maxClips = 1000;  // history size, pinned / foldered clips don't count
+#ifdef _WIN32
+    std::vector<std::string> excludedApps = {"KeePassXC", "KeePass", "Bitwarden", "1Password"};  // exe names, any case
+#else
     std::vector<std::string> excludedApps = {"KeePassXC", "Bitwarden", "1Password"};  // WM_CLASS, any case
+#endif
 
     Theme theme = Theme::System;
     bool customAccent = false;
