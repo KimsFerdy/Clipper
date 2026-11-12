@@ -91,8 +91,10 @@ Remove-Item -Recurse -Force $stage
 # same format as sha256sum on linux, so it can go next to (or into) the linux SHA256SUMS
 Push-Location $dist
 try {
-    Get-ChildItem -File | Where-Object Name -NotLike 'SHA256SUMS*' | Sort-Object Name | ForEach-Object {
+    $sums = Get-ChildItem -File | Where-Object Name -NotLike 'SHA256SUMS*' | Sort-Object Name | ForEach-Object {
         '{0}  ./{1}' -f (Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLower(), $_.Name
-    } | Set-Content -Encoding ascii SHA256SUMS-windows
+    }
+    # \n line ends: `sha256sum -c` on linux chokes on \r\n
+    [IO.File]::WriteAllText((Join-Path $dist 'SHA256SUMS-windows'), (($sums -join "`n") + "`n"))
 } finally { Pop-Location }
 Get-ChildItem $dist | Format-Table Name, @{ n = 'MB'; e = { [math]::Round($_.Length / 1MB, 2) } } -AutoSize
